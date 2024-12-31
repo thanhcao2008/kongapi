@@ -1,0 +1,196 @@
+version: '3.7'
+
+volumes:
+  kong_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./kong_data
+
+networks:
+  network_dev:
+    external: true
+    name: "network_dev"
+
+services:
+  kong-migrations:
+    image: "${KONG_DOCKER_TAG:-kong:latest}"
+    command: kong migrations bootstrap
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
+      KONG_PG_HOST: db
+      KONG_PG_USER: ${KONG_PG_USER:-kong}
+      KONG_PG_PASSWORD_FILE: /run/secrets/kong_postgres_password
+    secrets:
+      - kong_postgres_password
+    networks:
+      - network_dev
+    restart: on-failure
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  kong-migrations-up:
+    image: "${KONG_DOCKER_TAG:-kong:latest}"
+    command: kong migrations up && kong migrations finish
+    depends_on:
+      db:
+        condition: service_healthy
+      kong-migrations:
+        condition: service_completed_successfully
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
+      KONG_PG_HOST: db
+      KONG_PG_USER: ${KONG_PG_USER:-kong}
+      KONG_PG_PASSWORD_FILE: /run/secrets/kong_postgres_password
+    secrets:
+      - kong_postgres_password
+    networks:
+      - network_dev
+    restart: on-failure
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  kong:
+    container_name: kong
+    image: "${KONG_DOCKER_TAG:-kong:latest}"
+    user: "root"
+    depends_on:
+      db:
+        condition: service_healthy
+      kong-migrations:
+        condition: service_completed_successfully
+      kong-migrations-up:
+        condition: service_completed_successfully
+    environment:
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_PROXY_LISTEN: "${KONG_PROXY_LISTEN:-0.0.0.0:8000}"
+      KONG_ADMIN_LISTEN: "${KONG_ADMIN_LISTEN:-0.0.0.0:8001}"
+      KONG_CASSANDRA_CONTACT_POINTS: db
+      KONG_DATABASE: postgres
+      KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
+      KONG_PG_HOST: db
+      KONG_PG_USER: ${KONG_PG_USER:-kong}
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_PG_PASSWORD_FILE: /run/secrets/kong_postgres_password
+    secrets:
+      - kong_postgres_password
+    networks:
+      - network_dev
+    ports:
+      - "8000:8000/tcp"
+      - "8001:8001/tcp"
+      - "8443:8443/tcp"
+      - "127.0.0.1:18444:8444/tcp"
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: on-failure
+    deploy:
+      restart_policy:
+        condition: on-failure
+    
+  db:
+    image: postgres:9.5
+    environment:
+      POSTGRES_DB: ${KONG_PG_DATABASE:-kong}
+      POSTGRES_USER: ${KONG_PG_USER:-kong}
+      POSTGRES_PASSWORD_FILE: /run/secrets/kong_postgres_password
+    secrets:
+      - kong_postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kong -d kong"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: on-failure
+    deploy:
+      restart_policy:
+        condition: on-failure
+    stdin_open: true
+    tty: true
+    networks:
+      - network_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - kong_data:/var/lib/postgresql/data
+      - ./init-konga-db.sh:/docker-entrypoint-initdb.d/init-konga-db.sh
+
+  konga-prepare:
+    container_name: "konga-prepare"
+    image: pantsel/konga:latest
+    entrypoint: sh -c
+    command: >
+      set -e;
+      sleep 30;
+      node ./bin/konga.js prepare --adapter postgres --uri postgresql://kong:${KONG_PG_PASSWORD:-kong}@db:5432/konga;
+    networks:
+      - network_dev
+    restart: on-failure
+    depends_on:
+      db:
+        condition: service_healthy
+      kong-migrations:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: development
+      DB_ADAPTER: postgres
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: kong
+      DB_PASSWORD: ${KONG_PG_PASSWORD:-kong}
+      DB_DATABASE: konga
+      WAIT_HOSTS: db:5432
+      WAIT_HOSTS_TIMEOUT: 300
+  
+  konga:
+      container_name: konga
+      image: pantsel/konga:latest
+      environment:
+        NODE_ENV: development
+        DB_ADAPTER: postgres
+        DB_HOST: db
+        DB_PORT: 5432
+        DB_USER: kong
+        DB_PASSWORD: ${KONG_PG_PASSWORD:-kong}
+        DB_DATABASE: konga
+        TOKEN_SECRET: ${TOKEN_SECRET:-ahf91j2hfk29fj21hf921hf921hf921h}
+        SECRET_KEY: ${SECRET_KEY:-ahf91j2hfk29fj21hf921hf921hf921h}
+        JWT_SECRET: ${JWT_SECRET:-ahf91j2hfk29fj21hf921hf921hf921h}
+        PORT: 1337
+        HOST: 0.0.0.0
+        KONGA_HOOK_TIMEOUT: 120000
+        NODE_TLS_REJECT_UNAUTHORIZED: 0
+        KONGA_LOG_LEVEL: debug
+        KONG_ADMIN_URL: http://kong:8001
+        KONGA_HEALTH_CHECK_ENABLE: false
+        KONGA_AUTO_UPDATE_CONFIG: false
+        KONGA_SEED_USER_DATA_SOURCE_FILE: /app/users.js
+      restart: on-failure
+      networks:
+        - network_dev
+      depends_on:
+        db:
+          condition: service_healthy
+        kong:
+          condition: service_started
+        konga-prepare:
+          condition: service_completed_successfully
+      ports:
+        - "1337:1337"
+
+secrets:
+  kong_postgres_password:
+    file: ./POSTGRES_PASSWORD
