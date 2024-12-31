@@ -1,12 +1,12 @@
 version: '3.7'
 
-volumes:
-  kong_data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./kong_data
+#volumes:
+#  kong_data:
+#    driver: local
+#    driver_opts:
+#      type: none
+#      o: bind
+#      device: ./kong_data
 
 networks:
   network_dev:
@@ -125,7 +125,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - kong_data:/var/lib/postgresql/data
+      - ./kong_data:/var/lib/postgresql/data
       - ./init-konga-db.sh:/docker-entrypoint-initdb.d/init-konga-db.sh
 
   konga-prepare:
